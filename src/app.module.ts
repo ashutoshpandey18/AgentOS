@@ -5,6 +5,7 @@ import { AgentsModule } from './agents/agents.module';
 import { envValidationSchema } from './config/env.schema';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { WorkflowModule } from './workflow/workflow.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PrismaModule,
     AgentsModule,
     HealthModule,
+    WorkflowModule,
   ],
 })
 export class AppModule {}
