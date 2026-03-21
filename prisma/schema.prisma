@@ -7,6 +7,12 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum AgentRunStatus {
+  running
+  success
+  failed
+}
+
 model Agent {
   id        String   @id @default(uuid()) @db.Uuid
   name      String
@@ -20,6 +26,7 @@ model AgentRun {
   id        String   @id @default(uuid()) @db.Uuid
   agentId   String
   task      String
+  status    AgentRunStatus @default(running)
   result    String
   logs      Json
   createdAt DateTime @default(now())

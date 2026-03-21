@@ -70,10 +70,7 @@ Score: 7.5/10
 
 Issues:
 - Registry design is solid (`intent -> tool`, `tool -> executor`), but unknown fallback remains outside registry path.
-- Tool execution signature includes `agentId` for all tools even when unused.
-- No central metadata (tool capabilities, input expectations) yet.
-
-Practical improvements:
+- Tool execution signature includes `agentId` ical improvements:
 - Add explicit `unknown` strategy in registry to avoid branching outside the registry.
 - Use per-tool input objects to avoid unused parameters.
 - Add tool descriptors (`name`, `supportedIntents`, `inputSchema`) for scalability.

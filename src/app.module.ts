@@ -5,6 +5,7 @@ import { AgentsModule } from './agents/agents.module';
 import { envValidationSchema } from './config/env.schema';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { RunsModule } from './runs/runs.module';
 import { WorkflowModule } from './workflow/workflow.module';
 
 @Module({
@@ -21,6 +22,7 @@ import { WorkflowModule } from './workflow/workflow.module';
     PrismaModule,
     AgentsModule,
     HealthModule,
+    RunsModule,
     WorkflowModule,
   ],
 })
