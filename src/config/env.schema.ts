@@ -5,6 +5,7 @@ const databaseUrlSchema = Joi.string().uri({ scheme: [/postgresql?/] });
 export const envValidationSchema = Joi.object({
   NODE_ENV: Joi.string().valid('development', 'test', 'production').default('development'),
   PORT: Joi.number().port().default(3000),
+  GROQ_API_KEY: Joi.string().allow('').optional(),
   DATABASE_URL: Joi.alternatives().conditional('NODE_ENV', {
     is: 'production',
     then: databaseUrlSchema.required(),
