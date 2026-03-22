@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { LlmService } from './llm.service';
 import { WorkflowGateway } from './workflow.gateway';
 import { detectIntent, DetectedIntent } from './intent-detector';
 import { executeToolByName, selectToolForIntent, ToolName } from './tools/tool.registry';
@@ -35,31 +36,20 @@ type WorkflowRunResponse = {
 };
 
 const MAX_TOOL_RETRIES = 2;
+const AGENT_MODE_RULE_BASED = 'RULE_BASED';
+const AGENT_MODE_LLM = 'LLM';
 
 @Injectable()
 export class WorkflowService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly llmService: LlmService,
     private readonly workflowGateway: WorkflowGateway,
   ) {}
 
   async runAgent(task: string, agentId: string): Promise<WorkflowRunResponse> {
-    if (!task?.trim()) {
-      throw new BadRequestException('Task is required');
-    }
-
-    if (!agentId?.trim()) {
-      throw new BadRequestException('Agent ID is required');
-    }
-
-    const agent = await this.prisma.agent.findUnique({
-      where: { id: agentId },
-      select: { id: true },
-    });
-
-    if (!agent) {
-      throw new NotFoundException(`Agent with id '${agentId}' was not found`);
-    }
+    this.validateRunInput(task, agentId);
+    const agent = await this.getAgentOrThrow(agentId);
 
     const state: WorkflowState = {
       status: 'running',
@@ -82,7 +72,7 @@ export class WorkflowService {
       },
     });
 
-    state.intent = detectIntent(task);
+    state.intent = await this.detectIntentByMode(task, agent.mode, state);
     this.appendLog(state, 'intent', `Intent detected: ${state.intent}`);
 
     state.tool = selectToolForIntent(state.intent);
@@ -90,10 +80,12 @@ export class WorkflowService {
 
     try {
       if (!state.tool) {
-        this.appendLog(state, 'execution', 'Done! Unknown intent - no tool executed');
+        state.result = 'Unknown intent';
+        this.appendLog(state, 'execution', 'Unknown intent - no tool executed');
       } else {
         this.appendLog(state, 'execution', 'Executing...');
         state.result = await this.executeToolWithRetry(state, state.tool, task, agentId);
+        this.appendLog(state, 'execution', `Execution result: ${state.result}`);
         this.appendLog(state, 'execution', 'Done!');
       }
 
@@ -130,8 +122,69 @@ export class WorkflowService {
     };
   }
 
+  private validateRunInput(task: string, agentId: string) {
+    if (!task?.trim()) {
+      throw new BadRequestException('Task is required');
+    }
+
+    if (!agentId?.trim()) {
+      throw new BadRequestException('Agent ID is required');
+    }
+  }
+
+  private async getAgentOrThrow(agentId: string) {
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      select: {
+        id: true,
+        mode: true,
+      },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with id '${agentId}' was not found`);
+    }
+
+    return agent;
+  }
+
   private async executeTool(tool: ToolName, task: string, agentId: string): Promise<string> {
     return executeToolByName(tool, task, agentId);
+  }
+
+  private async detectIntentByMode(
+    task: string,
+    mode: string,
+    state: WorkflowState,
+  ): Promise<DetectedIntent> {
+    if (this.normalizeMode(mode) === AGENT_MODE_LLM) {
+      this.appendLog(state, 'intent', 'Intent detection method: LLM');
+      try {
+        return await this.llmService.detectIntentWithLLM(task);
+      } catch {
+        this.appendLog(state, 'intent', 'LLM failed, fallback to rule-based');
+      }
+
+      return detectIntent(task);
+    }
+
+    this.appendLog(state, 'intent', 'Intent detection method: RULE_BASED');
+
+    return detectIntent(task);
+  }
+
+  private normalizeMode(mode: string): string {
+    const normalized = mode.trim().toUpperCase().replace('-', '_');
+
+    if (normalized === 'RULE_BASED' || normalized === 'RULE') {
+      return AGENT_MODE_RULE_BASED;
+    }
+
+    if (normalized === 'LLM') {
+      return AGENT_MODE_LLM;
+    }
+
+    return AGENT_MODE_RULE_BASED;
   }
 
   private async executeToolWithRetry(
