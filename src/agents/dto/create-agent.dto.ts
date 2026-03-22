@@ -1,6 +1,6 @@
 import { IsArray, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
-const AGENT_MODES = ['rule-based', 'llm'] as const;
+const AGENT_MODES = ['rule-based', 'llm', 'RULE_BASED', 'LLM'] as const;
 
 export type AgentMode = (typeof AGENT_MODES)[number];
 
