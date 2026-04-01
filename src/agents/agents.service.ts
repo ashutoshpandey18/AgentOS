@@ -54,4 +54,24 @@ export class AgentsService {
       throw error;
     }
   }
+
+  async getAgentRuns(agentId: string, limit: number = 20, offset: number = 0) {
+    // Ensure agent exists
+    await this.findOne(agentId);
+
+    return this.prisma.agentRun.findMany({
+      where: { agentId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+      select: {
+        id: true,
+        task: true,
+        result: true,
+        status: true,
+        logs: true,
+        createdAt: true,
+      },
+    });
+  }
 }
