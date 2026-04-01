@@ -20,14 +20,19 @@ model Agent {
   tools     Json
   mode      String
   createdAt DateTime @default(now())
+  runs      AgentRun[]
 }
 
 model AgentRun {
   id        String   @id @default(uuid()) @db.Uuid
-  agentId   String
+  agentId   String   @db.Uuid
   task      String
   status    AgentRunStatus @default(running)
   result    String
   logs      Json
   createdAt DateTime @default(now())
+
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
 }
