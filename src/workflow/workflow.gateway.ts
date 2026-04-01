@@ -10,11 +10,11 @@ export class WorkflowGateway {
   @WebSocketServer()
   server!: Server;
 
-  emitLog(message: string) {
-    this.server.emit('log', message);
+  emitLog(runId: string, message: string) {
+    this.server.emit('log', { runId, message });
   }
 
-  emitComplete(result: string) {
-    this.server.emit('complete', { result });
+  emitComplete(runId: string, result: string) {
+    this.server.emit('complete', { runId, result });
   }
 }

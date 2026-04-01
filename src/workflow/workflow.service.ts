@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -17,6 +18,7 @@ type WorkflowLogEntry = {
   step: string;
   message: string;
   timestamp: Date;
+  isInternal?: boolean;
 };
 
 type WorkflowStatus = 'running' | 'success' | 'failed';
@@ -72,53 +74,61 @@ export class WorkflowService {
       },
     });
 
-    state.intent = await this.detectIntentByMode(task, agent.mode, state);
-    this.appendLog(state, 'intent', `Intent detected: ${state.intent}`);
-
-    state.tool = selectToolForIntent(state.intent);
-    this.appendLog(state, 'tool-selection', `Tool selected: ${state.tool ?? 'unknown'}`);
-
     try {
+      // 1. Detect Intent
+      state.intent = await this.detectIntentByMode(task, agent.mode, state, runRecord.id);
+      this.appendLog(state, runRecord.id, 'intent', `Intent detected: ${state.intent}`);
+
+      // 2. Select Tool
+      state.tool = selectToolForIntent(state.intent);
+      this.appendLog(state, runRecord.id, 'tool-selection', `Tool selected: ${state.tool ?? 'unknown'}`);
+
+      // 3. Enforcement: Tool-Agent Permission Mapping
+      if (state.tool && !this.isToolAuthorized(agent.tools, state.tool)) {
+        state.result = `Security: Tool '${state.tool}' is not authorized for this agent.`;
+        this.appendLog(state, runRecord.id, 'security', state.result);
+        state.status = 'failed';
+
+        await this.updateRunRecord(runRecord.id, state);
+        throw new ForbiddenException(state.result);
+      }
+
+      // 4. Execute Tool
       if (!state.tool) {
         state.result = 'Unknown intent';
-        this.appendLog(state, 'execution', 'Unknown intent - no tool executed');
+        this.appendLog(state, runRecord.id, 'execution', 'Unknown intent - no tool executed');
       } else {
-        this.appendLog(state, 'execution', 'Executing...');
-        state.result = await this.executeToolWithRetry(state, state.tool, task, agentId);
-        this.appendLog(state, 'execution', `Execution result: ${state.result}`);
-        this.appendLog(state, 'execution', 'Done!');
+        this.appendLog(state, runRecord.id, 'execution', 'Executing...');
+        state.result = await this.executeToolWithRetry(state, runRecord.id, state.tool, task, agentId);
+        this.appendLog(state, runRecord.id, 'execution', `Execution result: ${state.result}`);
+        this.appendLog(state, runRecord.id, 'execution', 'Done!');
       }
 
       state.status = 'success';
     } catch (error) {
-      state.status = 'failed';
-      this.appendLog(state, 'execution', 'Execution failed');
-      await this.prisma.agentRun.update({
-        where: { id: runRecord.id },
-        data: {
-          status: state.status,
-          result: state.result,
-          logs: state.logs,
-        } as any,
-      });
+      if (state.status !== 'failed') {
+        state.status = 'failed';
+        this.appendLog(state, runRecord.id, 'execution', 'Execution failed');
+      }
+
+      await this.updateRunRecord(runRecord.id, state);
+
+      if (error instanceof ForbiddenException) {
+        throw error;
+      }
       throw new InternalServerErrorException('Agent run failed');
     }
 
-    await this.prisma.agentRun.update({
-      where: { id: runRecord.id },
-      data: {
-        status: state.status,
-        result: state.result,
-        logs: state.logs,
-      } as any,
-    });
-
-    this.workflowGateway.emitComplete(state.result);
+    // Final update and WS notification
+    await this.updateRunRecord(runRecord.id, state);
+    this.workflowGateway.emitComplete(runRecord.id, state.result);
 
     return {
       status: 'success',
       result: state.result,
-      logs: state.logs.map((log) => log.message),
+      logs: state.logs
+        .filter((log) => !log.isInternal) // Hide internal/fallback logs from user
+        .map((log) => log.message),
     };
   }
 
@@ -138,6 +148,7 @@ export class WorkflowService {
       select: {
         id: true,
         mode: true,
+        tools: true, // Fetch authorized tools
       },
     });
 
@@ -156,19 +167,20 @@ export class WorkflowService {
     task: string,
     mode: string,
     state: WorkflowState,
+    runId: string,
   ): Promise<DetectedIntent> {
     if (this.normalizeMode(mode) === AGENT_MODE_LLM) {
-      this.appendLog(state, 'intent', 'Intent detection method: LLM');
+      this.appendLog(state, runId, 'intent', 'Intent detection method: LLM', true);
       try {
         return await this.llmService.detectIntentWithLLM(task);
-      } catch {
-        this.appendLog(state, 'intent', 'LLM failed, fallback to rule-based');
+      } catch (error) {
+        this.appendLog(state, runId, 'intent', 'LLM failed, fallback used', true);
       }
 
       return detectIntent(task);
     }
 
-    this.appendLog(state, 'intent', 'Intent detection method: RULE_BASED');
+    this.appendLog(state, runId, 'intent', 'Intent detection method: RULE_BASED', true);
 
     return detectIntent(task);
   }
@@ -189,6 +201,7 @@ export class WorkflowService {
 
   private async executeToolWithRetry(
     state: WorkflowState,
+    runId: string,
     tool: ToolName,
     task: string,
     agentId: string,
@@ -207,6 +220,7 @@ export class WorkflowService {
 
         this.appendLog(
           state,
+          runId,
           'retry',
           `Tool failed on attempt ${attemptNumber}/${maxAttempts}. Retrying (${attemptNumber}/${MAX_TOOL_RETRIES})...`,
         );
@@ -216,17 +230,61 @@ export class WorkflowService {
     throw new InternalServerErrorException('Tool execution failed');
   }
 
-  private appendLog(state: WorkflowState, step: string, message: string) {
-    const entry = this.createLog(step, message);
+private appendLog(state: WorkflowState, runId: string, step: string, message: string, isInternal = false) {
+    const entry = this.createLog(step, message, isInternal);
     state.logs.push(entry);
-    this.workflowGateway.emitLog(entry.message);
+
+    // Only emit non-internal logs to WebSocket
+    if (!isInternal) {
+      this.workflowGateway.emitLog(runId, entry.message);
+    }
   }
 
-  private createLog(step: string, message: string): WorkflowLogEntry {
+  private createLog(step: string, message: string, isInternal = false): WorkflowLogEntry {
     return {
       step,
       message,
       timestamp: new Date(),
+      isInternal,
     };
+  }
+
+  private isToolAuthorized(agentTools: any, selectedTool: string): boolean {
+    if (Array.isArray(agentTools)) {
+      return agentTools.includes(selectedTool);
+    }
+    return false;
+  }
+
+  private async updateRunRecord(runId: string, state: WorkflowState) {
+    await this.prisma.agentRun.update({
+      where: { id: runId },
+      data: {
+        status: state.status,
+        result: state.result,
+        logs: state.logs,
+      } as any,
+    });
+  }
+
+  async getRunById(runId: string) {
+    const run = await this.prisma.agentRun.findUnique({
+      where: { id: runId },
+      select: {
+        id: true,
+        agentId: true,
+        task: true,
+        result: true,
+        status: true,
+        logs: true,
+        createdAt: true,
+      },
+    });
+
+    if (!run) {
+      throw new NotFoundException(`Run with id '${runId}' was not found`);
+    }
+
+    return run;
   }
 }
